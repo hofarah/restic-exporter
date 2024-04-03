@@ -17,7 +17,7 @@ from prometheus_client.core import GaugeMetricFamily, CounterMetricFamily, REGIS
 class ResticCollector(object):
     def __init__(
         self, repository, password_file, exit_on_error, disable_check,
-            disable_stats, disable_locks, include_paths
+            disable_stats, disable_locks, include_paths, insecure_tls
     ):
         self.repository = repository
         self.password_file = password_file
@@ -26,6 +26,7 @@ class ResticCollector(object):
         self.disable_stats = disable_stats
         self.disable_locks = disable_locks
         self.include_paths = include_paths
+        self.insecure_tls = insecure_tls
         # todo: the stats cache increases over time -> remove old ids
         # todo: cold start -> the stats cache could be saved in a persistent volume
         # todo: cold start -> the restic cache (/root/.cache/restic) could be
@@ -67,6 +68,11 @@ class ResticCollector(object):
             "Timestamp of the last backup",
             labels=common_label_names,
         )
+        oldest_backup_timestamp = GaugeMetricFamily(
+            "restic_oldest_backup_timestamp",
+            "Timestamp of the oldest backup",
+            labels=common_label_names,
+        )
         backup_files_total = CounterMetricFamily(
             "restic_backup_files_total",
             "Number of files in the backup",
@@ -104,6 +110,7 @@ class ResticCollector(object):
             ]
 
             backup_timestamp.add_metric(common_label_values, client["timestamp"])
+            oldest_backup_timestamp.add_metric(common_label_values, client["oldest_timestamp"])
             backup_files_total.add_metric(common_label_values, client["files_total"])
             backup_size_total.add_metric(common_label_values, client["size_total"])
             backup_snapshots_total.add_metric(
@@ -116,6 +123,7 @@ class ResticCollector(object):
         yield locks_total
         yield snapshots_total
         yield backup_timestamp
+        yield oldest_backup_timestamp
         yield backup_files_total
         yield backup_size_total
         yield backup_snapshots_total
@@ -140,29 +148,23 @@ class ResticCollector(object):
         # calc total number of snapshots per hash
         all_snapshots = self.get_snapshots()
         snap_total_counter = {}
+        oldest_snapshots = {}
         for snap in all_snapshots:
             if snap["hash"] not in snap_total_counter:
                 snap_total_counter[snap["hash"]] = 1
             else:
                 snap_total_counter[snap["hash"]] += 1
 
+            snap["timestamp"] = self.parse_time(snap["time"])
+            if snap["hash"] not in oldest_snapshots or \
+                    snap["timestamp"] < oldest_snapshots[snap["hash"]]["timestamp"]:
+                oldest_snapshots[snap["hash"]] = snap
+
         # get the latest snapshot per hash
         latest_snapshots_dup = self.get_snapshots(True)
         latest_snapshots = {}
         for snap in latest_snapshots_dup:
-            time_parsed = re.sub(r"\.[^+-]+", "", snap["time"])
-            if len(time_parsed) > 19:
-                # restic 14: '2023-01-12T06:59:33.1576588+01:00' ->
-                # '2023-01-12T06:59:33+01:00'
-                time_format = "%Y-%m-%dT%H:%M:%S%z"
-            else:
-                # restic 12: '2023-02-01T14:14:19.30760523Z' ->
-                # '2023-02-01T14:14:19'
-                time_format = "%Y-%m-%dT%H:%M:%S"
-            timestamp = time.mktime(
-                datetime.datetime.strptime(time_parsed, time_format).timetuple()
-            )
-            snap["timestamp"] = timestamp
+            snap["timestamp"] = self.parse_time(snap["time"])
             if snap["hash"] not in latest_snapshots or \
                     snap["timestamp"] > latest_snapshots[snap["hash"]]["timestamp"]:
                 latest_snapshots[snap["hash"]] = snap
@@ -189,6 +191,7 @@ class ResticCollector(object):
                     "snapshot_tags": ",".join(snap["tags"]) if "tags" in snap else "",
                     "snapshot_paths": ",".join(snap["paths"]) if self.include_paths else "",
                     "timestamp": snap["timestamp"],
+                    "oldest_timestamp": oldest_snapshots[snap["hash"]]["timestamp"],
                     "size_total": stats["total_size"],
                     "files_total": stats["total_file_count"],
                     "snapshots_total": snap_total_counter[snap["hash"]],
@@ -238,6 +241,9 @@ class ResticCollector(object):
         if only_latest:
             cmd.extend(["--latest", "1"])
 
+        if self.insecure_tls:
+            cmd.extend(["--insecure-tls"])
+
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode != 0:
             raise Exception(
@@ -270,6 +276,9 @@ class ResticCollector(object):
         if snapshot_id is not None:
             cmd.extend([snapshot_id])
 
+        if self.insecure_tls:
+            cmd.extend(["--insecure-tls"])
+
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode != 0:
             raise Exception(
@@ -294,6 +303,9 @@ class ResticCollector(object):
             "check",
         ]
 
+        if self.insecure_tls:
+            cmd.extend(["--insecure-tls"])
+
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode == 0:
             return 1  # ok
@@ -315,6 +327,9 @@ class ResticCollector(object):
             "locks",
         ]
 
+        if self.insecure_tls:
+            cmd.extend(["--insecure-tls"])
+
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode != 0:
             raise Exception(
@@ -327,6 +342,22 @@ class ResticCollector(object):
     def calc_snapshot_hash(snapshot: dict) -> str:
         text = snapshot["hostname"] + snapshot["username"] + ",".join(snapshot["paths"])
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def parse_time(restic_time):
+        time_parsed = re.sub(r"\.[^+-]+", "", restic_time)
+        if len(time_parsed) > 19:
+            # restic 14: '2023-01-12T06:59:33.1576588+01:00' ->
+            # '2023-01-12T06:59:33+01:00'
+            time_format = "%Y-%m-%dT%H:%M:%S%z"
+        else:
+            # restic 12: '2023-02-01T14:14:19.30760523Z' ->
+            # '2023-02-01T14:14:19'
+            time_format = "%Y-%m-%dT%H:%M:%S"
+        timestamp = time.mktime(
+            datetime.datetime.strptime(time_parsed, time_format).timetuple()
+        )
+        return timestamp
 
     @staticmethod
     def parse_stderr(result):
@@ -379,6 +410,7 @@ if __name__ == "__main__":
     exporter_disable_stats = bool(os.environ.get("NO_STATS", False))
     exporter_disable_locks = bool(os.environ.get("NO_LOCKS", False))
     exporter_include_paths = bool(os.environ.get("INCLUDE_PATHS", False))
+    exporter_insecure_tls = bool(os.environ.get("INSECURE_TLS", False))
 
     try:
         collector = ResticCollector(
@@ -389,6 +421,7 @@ if __name__ == "__main__":
             exporter_disable_stats,
             exporter_disable_locks,
             exporter_include_paths,
+            exporter_insecure_tls,
         )
         REGISTRY.register(collector)
         start_http_server(exporter_port, exporter_address)
