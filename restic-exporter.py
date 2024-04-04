@@ -16,13 +16,14 @@ from prometheus_client.core import GaugeMetricFamily, CounterMetricFamily, REGIS
 
 class ResticCollector(object):
     def __init__(
-        self, repository, password_file, exit_on_error, disable_check,
+        self, repository, password_file, exit_on_error, disable_check,disable_cache,
             disable_stats, disable_locks, include_paths, insecure_tls
     ):
         self.repository = repository
         self.password_file = password_file
         self.exit_on_error = exit_on_error
         self.disable_check = disable_check
+        self.disable_cache = disable_cache
         self.disable_stats = disable_stats
         self.disable_locks = disable_locks
         self.include_paths = include_paths
@@ -244,6 +245,9 @@ class ResticCollector(object):
         if self.insecure_tls:
             cmd.extend(["--insecure-tls"])
 
+        if self.disable_cache:
+            cmd.extend(["--no-cache"])
+
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode != 0:
             raise Exception(
@@ -278,6 +282,8 @@ class ResticCollector(object):
 
         if self.insecure_tls:
             cmd.extend(["--insecure-tls"])
+        if self.disable_cache:
+            cmd.extend(["--no-cache"])
 
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode != 0:
@@ -305,6 +311,8 @@ class ResticCollector(object):
 
         if self.insecure_tls:
             cmd.extend(["--insecure-tls"])
+        if self.disable_cache:
+            cmd.extend(["--no-cache"])
 
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode == 0:
@@ -329,6 +337,8 @@ class ResticCollector(object):
 
         if self.insecure_tls:
             cmd.extend(["--insecure-tls"])
+        if self.disable_cache:
+            cmd.extend(["--no-cache"])
 
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode != 0:
@@ -407,6 +417,7 @@ if __name__ == "__main__":
     exporter_refresh_interval = int(os.environ.get("REFRESH_INTERVAL", 60))
     exporter_exit_on_error = bool(os.environ.get("EXIT_ON_ERROR", False))
     exporter_disable_check = bool(os.environ.get("NO_CHECK", False))
+    exporter_disable_cache = bool(os.environ.get("NO_CHACHE", False))
     exporter_disable_stats = bool(os.environ.get("NO_STATS", False))
     exporter_disable_locks = bool(os.environ.get("NO_LOCKS", False))
     exporter_include_paths = bool(os.environ.get("INCLUDE_PATHS", False))
@@ -418,6 +429,7 @@ if __name__ == "__main__":
             restic_repo_password_file,
             exporter_exit_on_error,
             exporter_disable_check,
+            exporter_disable_cache,
             exporter_disable_stats,
             exporter_disable_locks,
             exporter_include_paths,
